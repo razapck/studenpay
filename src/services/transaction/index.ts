@@ -176,8 +176,8 @@ app.post('/api/transactions', async (req: any, res: any) => {
 
             } catch (err: any) {
                 const msg = err.response?.data?.error || err.message;
-                console.error(`Error fetching source wallet (${sourceWalletId}):`, msg);
-                throw new Error(`Wallet source introuvable ou erreur service: ${msg}`);
+                console.error(`Error fetching source wallet (${sourceWalletId}) from ${WALLET_SERVICE_URL}:`, msg);
+                throw new Error(`Wallet source introuvable ou erreur service (${WALLET_SERVICE_URL}): ${msg}`);
             }
         }
 
@@ -187,8 +187,8 @@ app.post('/api/transactions', async (req: any, res: any) => {
                 beneficiaireId = destResp.data.userId;
             } catch (err: any) {
                 const msg = err.response?.data?.error || err.message;
-                console.error(`Error fetching destination wallet (${destinationWalletId}):`, msg);
-                throw new Error(`Wallet destinataire introuvable ou erreur service: ${msg}`);
+                console.error(`Error fetching destination wallet (${destinationWalletId}) from ${WALLET_SERVICE_URL}:`, msg);
+                throw new Error(`Wallet destinataire introuvable ou erreur service (${WALLET_SERVICE_URL}): ${msg}`);
             }
         }
 
