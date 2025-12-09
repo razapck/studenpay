@@ -1,0 +1,23 @@
+[build]
+  command = "npm run build"
+  functions = "netlify/functions"
+
+[[redirects]]
+  from = "/api/users/*"
+  to = "/.netlify/functions/user/api/users/:splat"
+  status = 200
+
+[[redirects]]
+  from = "/api/auth/*"
+  to = "/.netlify/functions/user/api/auth/:splat"
+  status = 200
+
+[[redirects]]
+  from = "/api/wallets/*"
+  to = "/.netlify/functions/wallet/api/wallets/:splat"
+  status = 200
+
+[[redirects]]
+  from = "/api/transactions/*"
+  to = "/.netlify/functions/transaction/api/transactions/:splat"
+  status = 200

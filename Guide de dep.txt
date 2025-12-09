@@ -1,0 +1,42 @@
+Guide de Déploiement Netlify
+Votre projet est maintenant prêt (code "serverless" + configuration 
+netlify.toml
+). Voici les étapes pour le mettre en ligne.
+
+Option 1 : Déploiement via Git (Recommandé)
+C'est la méthode standard qui permet des mises à jour automatiques à chaque modification.
+
+Initialisez Git (si ce n'est pas déjà fait) :
+git init
+git add .
+git commit -m "Déploiement initial sur Netlify"
+Poussez sur GitHub/GitLab/Bitbucket : Créez un repository et poussez votre code.
+Connectez Netlify :
+Allez sur netlify.com.
+Cliquez sur "Add new site" > "Import an existing project".
+Sélectionnez votre provider (GitHub, etc.) et votre repository.
+Configuration du Build : Netlify devrait détecter automatiquement les paramètres grâce au fichier 
+netlify.toml
+.
+Build command: npm run build
+Publish directory: dist (ou laisser vide car ce sont des functions)
+Variables d'Environnement (CRITIQUE) : Avant ou après le premier déploiement (qui échouera sans elles), allez dans Site configuration > Environment variables et ajoutez :
+SUPABASE_URL: (Votre URL Supabase)
+SUPABASE_SERVICE_ROLE_KEY: (Votre clé secrète Supabase)
+WALLET_SERVICE_URL: L'URL de votre site Netlify suivi de /api/wallets (ex: https://mon-app.netlify.app/api/wallets). Note : Pour le premier déploiement, vous pouvez mettre une valeur temporaire puis la mettre à jour une fois l'URL connue.
+Option 2 : Déploiement Manuel (Netlify CLI)
+Si vous ne voulez pas utiliser Git pour l'instant.
+
+Installez la CLI Netlify (si nécessaire) :
+npm install -g netlify-cli
+Connectez-vous :
+netlify login
+Déployez :
+netlify deploy
+Suivez les instructions (Create & configure a new site).
+Publish directory : . (ou laissez par défaut, le 
+netlify.toml
+ gère les fonctions).
+Déploiement Production : Si le test fonctionne :
+netlify deploy --prod
+Configurez les variables : Comme pour l'option 1, n'oubliez pas d'ajouter les variables d'environnement dans le tableau de bord Netlify.
