@@ -1,18 +1,19 @@
-import { createClient } from '@supabase/supabase-js';
-import dotenv from 'dotenv'
+import mysql from 'mysql2/promise';
+import dotenv from 'dotenv';
 
 dotenv.config();
 
-const supabaseUrl = "https://jdxfqqbidofoqsdhhgtc.supabase.co"
-const supabaseKey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpkeGZxcWJpZG9mb3FzZGhoZ3RjIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2NDU0MDY1MiwiZXhwIjoyMDgwMTE2NjUyfQ.fCnOCd6wLJkVGG44AvbuIIlgxuFXZciujT_58r3awlA"
-  ; // Utiliser la clé de service pour l'API backend
+const pool = mysql.createPool({
+  host: process.env.DB_HOST,
+  port: parseInt(process.env.DB_PORT || '3306'),
+  user: process.env.DB_USER,
+  password: process.env.DB_PASSWORD,
+  database: process.env.DB_NAME,
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0
+});
 
-if (!supabaseUrl || !supabaseKey) {
-  console.error('ERREUR: Les variables SUPABASE_URL et SUPABASE_SERVICE_ROLE_KEY sont requises dans le fichier .env');
-  process.exit(1);
-}
+export default pool;
 
-// Initialisation du client Supabase
-export const supabase = createClient(supabaseUrl, supabaseKey);
-
-console.log("Supabase client initialized.");
+console.log("MySQL connection pool initialized.");
