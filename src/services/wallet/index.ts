@@ -1,7 +1,6 @@
 import express from 'express';
 import cors from 'cors';
-import { db, uuidToBinary, binaryToUuid } from '../../shared/db';
-import { RowDataPacket, ResultSetHeader } from 'mysql2';
+import { supabase } from '../../shared/db';
 
 const app = express();
 const PORT = 3002;
@@ -28,66 +27,75 @@ app.options('*', (req: any, res: any) => {
     res.status(204).send();
 });
 
-// --- HELPERS ---
-const mapDbWalletToApi = (w: any) => ({
-    id: binaryToUuid(w.id),
-    userId: binaryToUuid(w.titulaire_id),
-    balance: w.solde,
-    currency: w.monnaie
-});
-
 // --- WALLET ---
 
 // Get Wallet by User ID
 app.get('/api/wallets/user/:userId', async (req: any, res: any) => {
     const { userId } = req.params;
 
-    try {
-        const [rows] = await db.execute<RowDataPacket[]>(
-            'SELECT * FROM wallets WHERE titulaire_id = ?',
-            [uuidToBinary(userId)]
-        );
+    const { data, error } = await supabase
+        .from('wallets')
+        .select('*')
+        .eq('titulaire_id', userId)
+        .single();
 
-        if (rows.length === 0) {
-            return res.status(404).json({ error: "Wallet introuvable" });
-        }
-
-        res.json(mapDbWalletToApi(rows[0]));
-    } catch (error: any) {
-        res.status(500).json({ error: error.message });
+    if (error) {
+        return res.status(404).json({ error: "Wallet introuvable" });
     }
+
+    // Mapping DB -> API
+    const wallet = {
+        id: data.id,
+        userId: data.titulaire_id,
+        balance: data.solde,
+        currency: data.monnaie
+    };
+
+    res.json(wallet);
 });
 
 // Get All Wallets
 app.get('/api/wallets', async (req: any, res: any) => {
-    try {
-        const [rows] = await db.execute<RowDataPacket[]>(
-            'SELECT * FROM wallets ORDER BY created_at DESC'
-        );
-        res.json(rows.map(mapDbWalletToApi));
-    } catch (error: any) {
-        res.status(500).json({ error: error.message });
+    const { data, error } = await supabase
+        .from('wallets')
+        .select('*')
+        .order('created_at', { ascending: false });
+
+    if (error) {
+        return res.status(500).json({ error: error.message });
     }
+
+    // Mapping DB -> API
+    const wallets = data.map((w: any) => ({
+        id: w.id,
+        userId: w.titulaire_id,
+        balance: w.solde,
+        currency: w.monnaie
+    }));
+
+    res.json(wallets);
 });
 
 // Get Wallet by ID (Internal/Public)
 app.get('/api/wallets/:id', async (req: any, res: any) => {
     const { id } = req.params;
 
-    try {
-        const [rows] = await db.execute<RowDataPacket[]>(
-            'SELECT * FROM wallets WHERE id = ?',
-            [uuidToBinary(id)]
-        );
+    const { data, error } = await supabase
+        .from('wallets')
+        .select('*')
+        .eq('id', id)
+        .single();
 
-        if (rows.length === 0) {
-            return res.status(404).json({ error: "Wallet introuvable" });
-        }
-
-        res.json(mapDbWalletToApi(rows[0]));
-    } catch (error: any) {
-        res.status(500).json({ error: error.message });
+    if (error || !data) {
+        return res.status(404).json({ error: "Wallet introuvable" });
     }
+
+    res.json({
+        id: data.id,
+        userId: data.titulaire_id,
+        balance: data.solde,
+        currency: data.monnaie
+    });
 });
 
 // Debit Wallet (Internal)
@@ -97,39 +105,26 @@ app.post('/api/wallets/:id/debit', async (req: any, res: any) => {
 
     if (!amount || amount <= 0) return res.status(400).json({ error: "Montant invalide" });
 
-    try {
-        const connection = await db.getConnection();
-        await connection.beginTransaction();
+    const { data: wallet, error: fetchError } = await supabase
+        .from('wallets')
+        .select('solde')
+        .eq('id', id)
+        .single();
 
-        try {
-            const [rows] = await connection.execute<RowDataPacket[]>(
-                'SELECT solde FROM wallets WHERE id = ? FOR UPDATE',
-                [uuidToBinary(id)]
-            );
+    if (fetchError || !wallet) return res.status(404).json({ error: "Wallet introuvable" });
 
-            if (rows.length === 0) throw new Error("Wallet introuvable");
-
-            const wallet = rows[0];
-            if (wallet.solde < amount) {
-                throw new Error("Solde insuffisant");
-            }
-
-            await connection.execute(
-                'UPDATE wallets SET solde = solde - ? WHERE id = ?',
-                [amount, uuidToBinary(id)]
-            );
-
-            await connection.commit();
-            res.json({ success: true });
-        } catch (err: any) {
-            await connection.rollback();
-            res.status(400).json({ error: err.message });
-        } finally {
-            connection.release();
-        }
-    } catch (error: any) {
-        res.status(500).json({ error: "Erreur lors du débit" });
+    if (wallet.solde < amount) {
+        return res.status(400).json({ error: "Solde insuffisant" });
     }
+
+    const { error: updateError } = await supabase
+        .from('wallets')
+        .update({ solde: wallet.solde - amount })
+        .eq('id', id);
+
+    if (updateError) return res.status(500).json({ error: "Erreur lors du débit" });
+
+    res.json({ success: true });
 });
 
 // Credit Wallet (Internal)
@@ -139,20 +134,22 @@ app.post('/api/wallets/:id/credit', async (req: any, res: any) => {
 
     if (!amount || amount <= 0) return res.status(400).json({ error: "Montant invalide" });
 
-    try {
-        const [result] = await db.execute<ResultSetHeader>(
-            'UPDATE wallets SET solde = solde + ? WHERE id = ?',
-            [amount, uuidToBinary(id)]
-        );
+    const { data: wallet, error: fetchError } = await supabase
+        .from('wallets')
+        .select('solde')
+        .eq('id', id)
+        .single();
 
-        if (result.affectedRows === 0) {
-            return res.status(404).json({ error: "Wallet introuvable" });
-        }
+    if (fetchError || !wallet) return res.status(404).json({ error: "Wallet introuvable" });
 
-        res.json({ success: true });
-    } catch (error: any) {
-        res.status(500).json({ error: "Erreur lors du crédit" });
-    }
+    const { error: updateError } = await supabase
+        .from('wallets')
+        .update({ solde: wallet.solde + amount })
+        .eq('id', id);
+
+    if (updateError) return res.status(500).json({ error: "Erreur lors du crédit" });
+
+    res.json({ success: true });
 });
 
 // --- WALLET CRUD ---
@@ -163,22 +160,26 @@ app.post('/api/wallets', async (req: any, res: any) => {
 
     if (!userId) return res.status(400).json({ error: "userId requis" });
 
-    try {
-        const id = require('crypto').randomUUID();
-        await db.execute(
-            'INSERT INTO wallets (id, titulaire_id, solde, monnaie) VALUES (?, ?, ?, ?)',
-            [uuidToBinary(id), uuidToBinary(userId), balance, currency]
-        );
+    const { data, error } = await supabase
+        .from('wallets')
+        .insert({
+            titulaire_id: userId,
+            solde: balance,
+            monnaie: currency
+        })
+        .select()
+        .single();
 
-        const [rows] = await db.execute<RowDataPacket[]>(
-            'SELECT * FROM wallets WHERE id = ?',
-            [uuidToBinary(id)]
-        );
-
-        res.status(201).json(mapDbWalletToApi(rows[0]));
-    } catch (error: any) {
-        res.status(400).json({ error: error.message });
+    if (error) {
+        return res.status(400).json({ error: error.message });
     }
+
+    res.status(201).json({
+        id: data.id,
+        userId: data.titulaire_id,
+        balance: data.solde,
+        currency: data.monnaie
+    });
 });
 
 // Update Wallet
@@ -186,54 +187,43 @@ app.put('/api/wallets/:id', async (req: any, res: any) => {
     const { id } = req.params;
     const { balance, currency } = req.body;
 
-    try {
-        const updates: string[] = [];
-        const params: any[] = [];
+    const updateData: any = {};
+    if (balance !== undefined) updateData.solde = balance;
+    if (currency !== undefined) updateData.monnaie = currency;
 
-        if (balance !== undefined) { updates.push('solde = ?'); params.push(balance); }
-        if (currency !== undefined) { updates.push('monnaie = ?'); params.push(currency); }
+    const { data, error } = await supabase
+        .from('wallets')
+        .update(updateData)
+        .eq('id', id)
+        .select()
+        .single();
 
-        if (updates.length > 0) {
-            params.push(uuidToBinary(id));
-            await db.execute(
-                `UPDATE wallets SET ${updates.join(', ')} WHERE id = ?`,
-                params
-            );
-        }
-
-        const [rows] = await db.execute<RowDataPacket[]>(
-            'SELECT * FROM wallets WHERE id = ?',
-            [uuidToBinary(id)]
-        );
-
-        if (rows.length === 0) {
-            return res.status(404).json({ error: "Wallet introuvable" });
-        }
-
-        res.json(mapDbWalletToApi(rows[0]));
-    } catch (error: any) {
-        res.status(404).json({ error: "Erreur de mise à jour: " + error.message });
+    if (error || !data) {
+        return res.status(404).json({ error: "Wallet introuvable ou erreur de mise à jour" });
     }
+
+    res.json({
+        id: data.id,
+        userId: data.titulaire_id,
+        balance: data.solde,
+        currency: data.monnaie
+    });
 });
 
 // Delete Wallet
 app.delete('/api/wallets/:id', async (req: any, res: any) => {
     const { id } = req.params;
 
-    try {
-        const [result] = await db.execute<ResultSetHeader>(
-            'DELETE FROM wallets WHERE id = ?',
-            [uuidToBinary(id)]
-        );
+    const { error } = await supabase
+        .from('wallets')
+        .delete()
+        .eq('id', id);
 
-        if (result.affectedRows === 0) {
-            return res.status(404).json({ error: "Wallet introuvable" });
-        }
-
-        res.json({ success: true, message: "Wallet supprimé" });
-    } catch (error: any) {
-        res.status(400).json({ error: error.message });
+    if (error) {
+        return res.status(400).json({ error: error.message });
     }
+
+    res.json({ success: true, message: "Wallet supprimé" });
 });
 
 if (process.env.NODE_ENV !== 'production') {
