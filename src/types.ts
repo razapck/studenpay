@@ -1,15 +1,15 @@
 // --- TYPES FRONTEND / API (Contrat existant) ---
 
 export enum TransactionType {
-  DEPOSIT = 'DEPOT',
-  TRANSFER = 'TRANSFERT',
-  PAYMENT = 'PAIEMENT'
+  DEPOSIT = 'deposit',
+  TRANSFER = 'transfer',
+  PAYMENT = 'payment'
 }
 
 export enum TransactionStatus {
-  PENDING = 'EN-COURS',
-  COMPLETED = 'COMPLETE',
-  FAILED = 'ECHOUE'
+  PENDING = 'pending',
+  COMPLETED = 'completed',
+  FAILED = 'failed'
 }
 
 export interface User {
