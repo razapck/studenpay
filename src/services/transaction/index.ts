@@ -48,19 +48,133 @@ const mapApiTypeToDb = (type: TransactionType | string): 'deposit' | 'transfer' 
     return 'transfer';
 };
 
+// --- HELPER : construction des maps userId → walletId[] et userId → nom ---
+
+async function buildUserMaps(userIds: Set<string>): Promise<{
+    userToWalletMap: Record<string, string[]>;
+    userToNameMap: Record<string, string>;
+}> {
+    const ids = Array.from(userIds);
+
+    const [walletsResult, usersResult] = await Promise.all([
+        supabase.from('wallets').select('id, titulaire_id').in('titulaire_id', ids),
+        supabase.from('users').select('id, nom').in('id', ids)
+    ]);
+
+    // FIX : un userId peut avoir plusieurs wallets → on stocke un tableau
+    const userToWalletMap: Record<string, string[]> = {};
+    walletsResult.data?.forEach((w: any) => {
+        if (!userToWalletMap[w.titulaire_id]) userToWalletMap[w.titulaire_id] = [];
+        userToWalletMap[w.titulaire_id].push(w.id);
+    });
+
+    const userToNameMap: Record<string, string> = {};
+    usersResult.data?.forEach((u: any) => {
+        userToNameMap[u.id] = u.nom;
+    });
+
+    return { userToWalletMap, userToNameMap };
+}
+
+// --- HELPER : mapping d'une DBTransaction → Transaction API ---
+
+function mapDbTxToApi(
+    tx: DBTransaction,
+    contextUserId: string | null, // null pour la vue admin (tous les dépôts)
+    userToWalletMap: Record<string, string[]>,
+    userToNameMap: Record<string, string>,
+    sourceWalletIdOverride?: string,
+    destinationWalletIdOverride?: string
+): Transaction {
+    const isReceived = contextUserId ? tx.beneficiaire_id === contextUserId : true;
+    const otherPartyId = isReceived ? tx.donneur_ordre_id : tx.beneficiaire_id;
+    const otherPartyName = otherPartyId ? (userToNameMap[otherPartyId] ?? 'Inconnu') : 'Inconnu';
+
+    let description = tx.description || '';
+
+    if (tx.type === 'transfer') {
+        description = isReceived
+            ? `Virement reçu de ${otherPartyName}`
+            : `Virement envoyé à ${otherPartyName}`;
+    } else if (tx.type === 'payment') {
+        description = isReceived
+            ? `Paiement reçu de ${otherPartyName}`
+            : `Paiement ${otherPartyName}`;
+    }
+
+    // FIX : on prend le 1er wallet du tableau (ou l'override passé en paramètre)
+    const sourceWalletId = sourceWalletIdOverride
+        ?? (tx.donneur_ordre_id ? (userToWalletMap[tx.donneur_ordre_id]?.[0]) : undefined);
+    const destinationWalletId = destinationWalletIdOverride
+        ?? (tx.beneficiaire_id ? (userToWalletMap[tx.beneficiaire_id]?.[0]) : undefined);
+
+    return {
+        id: tx.id,
+        amount: tx.montant,
+        type: mapTransactionTypeToApi(tx.type),
+        status: tx.status === 'completed' ? TransactionStatus.COMPLETED :
+            tx.status === 'pending' ? TransactionStatus.PENDING : TransactionStatus.FAILED,
+        createdAt: tx.created_at,
+        description,
+        sourceWalletId,
+        destinationWalletId
+    };
+}
+
 // --- TRANSACTIONS ---
 
-// Get Transactions for a Wallet
+// ----------------------------------------------------------------
+// FIX NOUVEAU : GET /api/transactions — Vue admin, filtre par type
+// Utilisé par ReceivedDeposits pour lister tous les dépôts reçus
+// Exemple : GET /api/transactions?type=deposit
+// ----------------------------------------------------------------
+app.get('/api/transactions', async (req: any, res: any) => {
+    const { type } = req.query;
+
+    // Construction de la requête Supabase
+    let query = supabase
+        .from('transactions')
+        .select('*')
+        .order('created_at', { ascending: false });
+
+    if (type) {
+        const dbType = mapApiTypeToDb(type as string);
+        query = query.eq('type', dbType);
+    }
+
+    const { data: txData, error: txError } = await query;
+
+    if (txError) {
+        return res.status(500).json({ error: txError.message });
+    }
+
+    if (!txData || txData.length === 0) {
+        return res.json([]);
+    }
+
+    // Collecte de tous les userIds impliqués
+    const userIds = new Set<string>();
+    (txData as DBTransaction[]).forEach(tx => {
+        if (tx.donneur_ordre_id) userIds.add(tx.donneur_ordre_id);
+        if (tx.beneficiaire_id) userIds.add(tx.beneficiaire_id);
+    });
+
+    const { userToWalletMap, userToNameMap } = await buildUserMaps(userIds);
+
+    const transactions: Transaction[] = (txData as DBTransaction[]).map(tx =>
+        mapDbTxToApi(tx, null, userToWalletMap, userToNameMap)
+    );
+
+    res.json(transactions);
+});
+
+// ----------------------------------------------------------------
+// GET /api/transactions/:walletId — Historique d'un wallet précis
+// ----------------------------------------------------------------
 app.get('/api/transactions/:walletId', async (req: any, res: any) => {
     const { walletId } = req.params;
 
-    // 1. Trouver le User ID associé à ce wallet
-    // On appelle le Wallet Service pour avoir les infos du wallet (ou on requête la DB directement car on partage la DB)
-    // Pour simplifier et garder la cohérence "microservice", on pourrait appeler le service, mais ici on a accès à la DB.
-    // Le plan disait "Partage DB", donc on peut faire des requêtes DB directes pour la lecture si c'est plus simple,
-    // mais pour l'écriture (balance), on doit passer par le service.
-    // Pour la lecture des transactions, on a besoin de l'ID titulaire.
-
+    // 1. Résoudre le userId associé au walletId
     const { data: walletData, error: walletError } = await supabase
         .from('wallets')
         .select('titulaire_id')
@@ -73,7 +187,7 @@ app.get('/api/transactions/:walletId', async (req: any, res: any) => {
 
     const userId = walletData.titulaire_id;
 
-    // 2. Récupérer les transactions
+    // 2. Récupérer toutes les transactions impliquant ce userId
     const { data: txData, error: txError } = await supabase
         .from('transactions')
         .select('*')
@@ -84,75 +198,45 @@ app.get('/api/transactions/:walletId', async (req: any, res: any) => {
         return res.status(500).json({ error: txError.message });
     }
 
-    // 3. Mapping User IDs -> Wallet IDs & User Names
-    // Ici on a besoin de savoir quels wallets correspondent aux users des transactions.
-    // On peut faire une requête DB directe pour ça aussi.
+    if (!txData || txData.length === 0) {
+        return res.json([]);
+    }
+
+    // 3. Construire les maps userId → walletId[] et userId → nom
     const userIds = new Set<string>();
     (txData as DBTransaction[]).forEach(tx => {
         if (tx.donneur_ordre_id) userIds.add(tx.donneur_ordre_id);
         if (tx.beneficiaire_id) userIds.add(tx.beneficiaire_id);
     });
 
-    const { data: walletsMapData } = await supabase
-        .from('wallets')
-        .select('id, titulaire_id')
-        .in('titulaire_id', Array.from(userIds));
+    const { userToWalletMap, userToNameMap } = await buildUserMaps(userIds);
 
-    const { data: usersData } = await supabase
-        .from('users')
-        .select('id, nom')
-        .in('id', Array.from(userIds));
-
-    const userToWalletMap: Record<string, string> = {};
-    walletsMapData?.forEach((w: any) => {
-        userToWalletMap[w.titulaire_id] = w.id;
-    });
-
-    const userToNameMap: Record<string, string> = {};
-    usersData?.forEach((u: any) => {
-        userToNameMap[u.id] = u.nom;
-    });
-
-    // 4. Mapping Final
+    // 4. Mapping final
+    // FIX : pour les transactions impliquant le walletId demandé, on force
+    // sourceWalletId ou destinationWalletId à ce walletId précis
     const transactions: Transaction[] = (txData as DBTransaction[]).map(tx => {
-        const isReceived = tx.beneficiaire_id === userId;
-        const otherPartyId = isReceived ? tx.donneur_ordre_id : tx.beneficiaire_id;
-        const otherPartyName = otherPartyId ? userToNameMap[otherPartyId] : 'Inconnu';
+        const isSender = tx.donneur_ordre_id === userId;
+        const isReceiver = tx.beneficiaire_id === userId;
 
-        let description = tx.description || '';
+        const sourceWalletIdOverride = isSender ? walletId : undefined;
+        const destinationWalletIdOverride = isReceiver ? walletId : undefined;
 
-        // Logique de formatage du libellé
-        if (tx.type === 'transfer') {
-            if (isReceived) {
-                description = `Virement recu de ${otherPartyName}`;
-            } else {
-                description = `Virement envoyé à ${otherPartyName}`;
-            }
-        } else if (tx.type === 'payment') {
-            if (isReceived) {
-                description = `Paiement reçu de ${otherPartyName}`;
-            } else {
-                description = `Paiement ${otherPartyName}`;
-            }
-        }
-
-        return {
-            id: tx.id,
-            amount: tx.montant,
-            type: mapTransactionTypeToApi(tx.type),
-            status: tx.status === 'completed' ? TransactionStatus.COMPLETED :
-                tx.status === 'pending' ? TransactionStatus.PENDING : TransactionStatus.FAILED,
-            createdAt: tx.created_at,
-            description: description,
-            sourceWalletId: tx.donneur_ordre_id ? userToWalletMap[tx.donneur_ordre_id] : undefined,
-            destinationWalletId: tx.beneficiaire_id ? userToWalletMap[tx.beneficiaire_id] : undefined
-        };
+        return mapDbTxToApi(
+            tx,
+            userId,
+            userToWalletMap,
+            userToNameMap,
+            sourceWalletIdOverride,
+            destinationWalletIdOverride
+        );
     });
 
     res.json(transactions);
 });
 
-// Create Transaction
+// ----------------------------------------------------------------
+// POST /api/transactions — Création d'une transaction
+// ----------------------------------------------------------------
 app.post('/api/transactions', async (req: any, res: any) => {
     const { amount, type, destinationWalletId, sourceWalletId, description } = req.body;
 
@@ -163,21 +247,19 @@ app.post('/api/transactions', async (req: any, res: any) => {
     let beneficiaireId = null;
 
     try {
-        // 1. Validation et Résolution des IDs via Wallet Service
+        // 1. Validation et résolution des IDs via Wallet Service
         if (sourceWalletId) {
             try {
                 const sourceResp = await axios.get(`${WALLET_SERVICE_URL}/${sourceWalletId}`);
                 donneurId = sourceResp.data.userId;
 
-                // Vérification solde via Wallet Service
                 if ((dbType === 'transfer' || dbType === 'payment') && sourceResp.data.balance < amount) {
                     throw new Error("Solde insuffisant");
                 }
-
             } catch (err: any) {
                 const msg = err.response?.data?.error || err.message;
-                console.error(`Error fetching source wallet (${sourceWalletId}) from ${WALLET_SERVICE_URL}:`, msg);
-                throw new Error(`Wallet source introuvable ou erreur service (${WALLET_SERVICE_URL}): ${msg}`);
+                console.error(`Error fetching source wallet (${sourceWalletId}):`, msg);
+                throw new Error(`Wallet source introuvable ou erreur service: ${msg}`);
             }
         }
 
@@ -187,14 +269,14 @@ app.post('/api/transactions', async (req: any, res: any) => {
                 beneficiaireId = destResp.data.userId;
             } catch (err: any) {
                 const msg = err.response?.data?.error || err.message;
-                console.error(`Error fetching destination wallet (${destinationWalletId}) from ${WALLET_SERVICE_URL}:`, msg);
-                throw new Error(`Wallet destinataire introuvable ou erreur service (${WALLET_SERVICE_URL}): ${msg}`);
+                console.error(`Error fetching destination wallet (${destinationWalletId}):`, msg);
+                throw new Error(`Wallet destinataire introuvable ou erreur service: ${msg}`);
             }
         }
 
-        // 2. Exécution (Distribuée)
+        // 2. Exécution distribuée
 
-        // Débit Source
+        // Débit source
         if (sourceWalletId && (dbType === 'transfer' || dbType === 'payment')) {
             try {
                 await axios.post(`${WALLET_SERVICE_URL}/${sourceWalletId}/debit`, { amount });
@@ -203,19 +285,19 @@ app.post('/api/transactions', async (req: any, res: any) => {
             }
         }
 
-        // Crédit Destination
+        // Crédit destination
         if (destinationWalletId) {
             try {
                 await axios.post(`${WALLET_SERVICE_URL}/${destinationWalletId}/credit`, { amount });
             } catch (err: any) {
-                // CRITICAL: Si le débit a réussi mais le crédit échoue, on a une incohérence.
-                // TODO: Implementer compensation (rembourser source).
+                // CRITICAL: débit effectué mais crédit échoué → incohérence
+                // TODO: Implémenter compensation (rembourser source).
                 console.error("CRITICAL: Credit failed after Debit succeeded", err);
                 throw new Error("Erreur lors du crédit du wallet destinataire (Fonds débités)");
             }
         }
 
-        // 3. Enregistrement Transaction
+        // 3. Enregistrement en base
         const { data: newTx, error: insertError } = await supabase
             .from('transactions')
             .insert({
@@ -255,4 +337,5 @@ if (process.env.NODE_ENV !== 'production') {
         console.log(`Transaction Service running on http://localhost:${PORT}`);
     });
 }
+
 export { app };
